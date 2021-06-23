@@ -227,8 +227,8 @@ pub mod sigma_protocol {
     use sha2::Digest;
     use ff::Field;
 
-    type Commit = G1;
-    type Answer = Fr;
+    pub type Commit = G1;
+    pub type Answer = Fr;
 
     fn challenge(commit: G1) -> Fr {
         let mut serialized_commit: Vec<u8> = Vec::new();
