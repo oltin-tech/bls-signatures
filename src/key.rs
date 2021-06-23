@@ -32,6 +32,7 @@ impl From<G1> for PublicKey {
         PublicKey(val)
     }
 }
+
 impl From<PublicKey> for G1 {
     fn from(val: PublicKey) -> Self {
         val.0
@@ -215,6 +216,67 @@ impl Serialize for PublicKey {
         let affine = res.into_affine()?;
 
         Ok(PublicKey(affine.into_projective()))
+    }
+}
+
+pub mod sigma_protocol {
+    use super::{
+        CryptoRng, CurveProjective, Fr, PrivateKey, PublicKey, RngCore, Serialize, Sha256,
+        G1,
+    };
+    use sha2::Digest;
+    use ff::Field;
+
+    type Commit = G1;
+    type Answer = Fr;
+
+    fn challenge(commit: G1) -> Fr {
+        let mut serialized_commit: Vec<u8> = Vec::new();
+        PublicKey(commit)
+            .write_bytes(&mut serialized_commit)
+            .unwrap();
+
+        let mut sha256 = Sha256::default();
+        sha256.update(&serialized_commit);
+
+        let challenge_bytes = sha256.finalize();
+        PrivateKey::from_bytes(&challenge_bytes).unwrap().0
+    }
+
+    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) {
+        let challenge: Fr = challenge(commit);
+
+        let mut lhs = G1::one();
+        lhs.mul_assign(answer);
+
+        let mut rhs = pubkey.0;
+        rhs.mul_assign(challenge);
+        rhs.add_assign(&commit);
+
+        assert_eq!(lhs, rhs)
+    }
+
+    pub fn prove<R: RngCore + CryptoRng>(prikey: PrivateKey, rng: &mut R) -> (Commit, Answer) {
+        let random = PrivateKey::generate(rng);
+        let commit = random.public_key().0;
+        let challenge = challenge(commit);
+
+        let mut answer = prikey.0;
+        answer.mul_assign(&challenge);
+        answer.add_assign(&random.0);
+        (commit, answer)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_sigma_protocol() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(73);
+
+        let prikey = PrivateKey::generate(&mut rng);
+        let (commit, answer) = prove(prikey, &mut rng);
+        verify(prikey.public_key(), commit, answer)
     }
 }
 

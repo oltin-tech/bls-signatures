@@ -3,3 +3,4 @@
 bls-signatures-ffi/target
 *.profile
 Cargo.lock
+.idea/
