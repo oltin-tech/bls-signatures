@@ -242,16 +242,18 @@ pub mod sigma_protocol {
         let mut serialized_commit: Vec<u8> = Vec::new();
         PublicKey(commit)
             .write_bytes(&mut serialized_commit)
-            .unwrap();
+            .expect("write bytes to vector should not fail");
 
         let mut sha256 = Sha256::default();
         sha256.update(&serialized_commit);
 
         let challenge_bytes = sha256.finalize();
-        PrivateKey::from_bytes(&challenge_bytes).unwrap().0
+        PrivateKey::from_bytes(&challenge_bytes)
+            .expect("length should be always match")
+            .0
     }
 
-    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) {
+    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) -> bool {
         let challenge: Fr = challenge(commit);
 
         let mut lhs = G1::one();
@@ -261,7 +263,7 @@ pub mod sigma_protocol {
         rhs.mul_assign(challenge);
         rhs.add_assign(&commit);
 
-        assert_eq!(lhs, rhs)
+        lhs == rhs
     }
 
     pub fn prove<R: RngCore + CryptoRng>(prikey: PrivateKey, rng: &mut R) -> (Commit, Answer) {
@@ -284,7 +286,7 @@ pub mod sigma_protocol {
 
         let prikey = PrivateKey::generate(&mut rng);
         let (commit, answer) = prove(prikey, &mut rng);
-        verify(prikey.public_key(), commit, answer)
+        assert!(verify(prikey.public_key(), commit, answer));
     }
 }
 
