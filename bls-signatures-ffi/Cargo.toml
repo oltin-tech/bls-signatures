@@ -10,7 +10,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 bls-signatures = { path = "..", default-features = false }
-rand = "0.7"
+rand = "0.8"
 libc = "0.2"
 groupy = "0.4.1"
 

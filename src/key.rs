@@ -221,14 +221,22 @@ impl Serialize for PublicKey {
 
 pub mod sigma_protocol {
     use super::{
-        CryptoRng, CurveProjective, Fr, PrivateKey, PublicKey, RngCore, Serialize, Sha256,
+        CryptoRng, CurveProjective, Error, Fr, PrivateKey, PublicKey, RngCore, Serialize, Sha256,
         G1,
     };
-    use sha2::Digest;
     use ff::Field;
+    use sha2::Digest;
 
     pub type Commit = G1;
     pub type Answer = Fr;
+
+    pub fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
+        Ok(PublicKey::from_bytes(bytes)?.0)
+    }
+
+    pub fn decode_answer(bytes: &[u8]) -> Result<Answer, Error> {
+        Ok(PrivateKey::from_bytes(bytes)?.0)
+    }
 
     fn challenge(commit: G1) -> Fr {
         let mut serialized_commit: Vec<u8> = Vec::new();
