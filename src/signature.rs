@@ -19,6 +19,7 @@ use blstrs::{
 
 use crate::error::Error;
 use crate::key::*;
+use paired::bls12_381::G2Uncompressed;
 
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
@@ -50,7 +51,7 @@ impl From<Signature> for G2Affine {
 
 impl Serialize for Signature {
     fn write_bytes(&self, dest: &mut impl io::Write) -> io::Result<()> {
-        dest.write_all(G2Compressed::from_affine(self.0).as_ref())?;
+        dest.write_all(G2Uncompressed::from_affine(self.0).as_ref())?;
 
         Ok(())
     }
@@ -62,14 +63,14 @@ impl Serialize for Signature {
 }
 
 fn g2_from_slice(raw: &[u8]) -> Result<G2Affine, Error> {
-    if raw.len() != G2Compressed::size() {
+    if raw.len() != G2Uncompressed::size() {
         return Err(Error::SizeMismatch);
     }
 
-    let mut res = G2Compressed::empty();
+    let mut res = G2Uncompressed::empty();
     res.as_mut().copy_from_slice(raw);
 
-    Ok(res.into_affine()?)
+    Ok(res.into_affine_unchecked()?)
 }
 
 /// Hash the given message, as used in the signature.
