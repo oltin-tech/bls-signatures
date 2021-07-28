@@ -221,10 +221,10 @@ impl Serialize for PublicKey {
 
 pub mod sigma_protocol {
     use super::{
-        CryptoRng, CurveProjective, Error, Fr, PrivateKey, PublicKey, RngCore, Serialize, Sha256,
-        G1,
+        CryptoRng, CurveProjective, Error, Fr, FrRepr, PrivateKey, PublicKey, RngCore, Serialize,
+        Sha256, G1,
     };
-    use ff::Field;
+    use ff::{Field,PrimeField,PrimeFieldRepr};
     use sha2::Digest;
 
     pub type Commit = G1;
@@ -247,10 +247,11 @@ pub mod sigma_protocol {
         let mut sha256 = Sha256::default();
         sha256.update(&serialized_commit);
 
-        let challenge_bytes = sha256.finalize();
-        PrivateKey::from_bytes(&challenge_bytes)
-            .expect("length should be always match")
-            .0
+        let mut challenge_bytes = sha256.finalize();
+        challenge_bytes[0] &= 0x3f;
+        let mut repr = FrRepr::default();
+        repr.read_be(&challenge_bytes[..]).unwrap();
+        Fr::from_repr(repr).expect("length should be always match")
     }
 
     pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) -> bool {
@@ -282,11 +283,13 @@ pub mod sigma_protocol {
     fn test_sigma_protocol() {
         use rand::rngs::StdRng;
         use rand::SeedableRng;
-        let mut rng = StdRng::seed_from_u64(73);
+        for i in 0..100 {
+            let mut rng = StdRng::seed_from_u64(i);
 
-        let prikey = PrivateKey::generate(&mut rng);
-        let (commit, answer) = prove(prikey, &mut rng);
-        assert!(verify(prikey.public_key(), commit, answer));
+            let prikey = PrivateKey::generate(&mut rng);
+            let (commit, answer) = prove(prikey, &mut rng);
+            assert!(verify(prikey.public_key(), commit, answer));
+        }
     }
 }
 
