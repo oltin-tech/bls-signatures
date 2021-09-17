@@ -7,7 +7,7 @@ use groupy::{CurveAffine, CurveProjective, EncodedPoint};
 use rayon::prelude::*;
 
 #[cfg(feature = "pairing")]
-use paired::bls12_381::{Bls12, Fq12, G1Affine, G2Affine, G2Compressed, G2};
+use paired::bls12_381::{Bls12, Fq12, G1Affine, G2Affine, G2};
 #[cfg(feature = "pairing")]
 use paired::{Engine, ExpandMsgXmd, HashToCurve, PairingCurveAffine};
 
@@ -19,7 +19,7 @@ use blstrs::{
 
 use crate::error::Error;
 use crate::key::*;
-use paired::bls12_381::G2Uncompressed;
+use paired::bls12_381::{G2Uncompressed, G1};
 
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
@@ -124,8 +124,71 @@ pub fn aggregate(signatures: &[Signature]) -> Result<Signature, Error> {
     Ok(Signature(res.into_affine()))
 }
 
+/// Verifies that the signature is the actual aggregated signature of the same message.
+/// This can only be used if `public_keys` have been proof of possession!!!
+/// Check IETF spec for details:
+/// https://tools.ietf.org/html/draft-irtf-cfrg-bls-signature-02#section-3.3
+///
+/// Calculated by `e(g1, signature) ==  e(\prod_{i = 0}^n pk_i, hash_i)`.
+#[cfg(feature = "pairing")]
+pub fn verify_same(signature: &Signature, h: &G2, public_keys: &[PublicKey]) -> bool {
+    if public_keys.is_empty() {
+        return false;
+    }
+
+    let is_valid = AtomicBool::new(true);
+
+    #[cfg(feature = "multicore")]
+    let aggregate_public_key = public_keys
+        .par_iter()
+        .fold(G1::zero, |mut acc, public_key| {
+            if public_key.0.is_zero() {
+                // zero key should fail
+                is_valid.store(false, Ordering::Relaxed);
+            }
+            acc.add_assign(&public_key.0);
+            acc
+        })
+        .reduce(G1::zero, |mut acc, val| {
+            acc.add_assign(&val);
+            acc
+        });
+
+    #[cfg(not(feature = "multicore"))]
+    let aggregate_public_key = public_keys.iter().fold(G1::zero(), |mut acc, public_key| {
+        if public_key.0.is_zero() {
+            // zero key should fail
+            is_valid.store(false, Ordering::Relaxed);
+        }
+        acc.add_assign(&public_key.0);
+        acc
+    });
+
+    if !is_valid.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    let h = h.into_affine().prepare();
+    let aggregate_public_key = aggregate_public_key.into_affine().prepare();
+    let mut ml = Bls12::miller_loop(&[(&aggregate_public_key, &h)]);
+
+    let mut g1_neg = G1Affine::one();
+    g1_neg.negate();
+    ml.mul_assign(&Bls12::miller_loop(&[(
+        &g1_neg.prepare(),
+        &signature.0.prepare(),
+    )]));
+
+    if let Some(res) = Bls12::final_exponentiation(&ml) {
+        Fq12::one() == res
+    } else {
+        false
+    }
+}
+
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys.
 /// Calculated by `e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i)`.
+#[cfg(feature = "pairing")]
 pub fn verify(signature: &Signature, hashes: &[G2], public_keys: &[PublicKey]) -> bool {
     if hashes.is_empty() || public_keys.is_empty() {
         return false;
@@ -205,6 +268,19 @@ pub fn verify(signature: &Signature, hashes: &[G2], public_keys: &[PublicKey]) -
     } else {
         false
     }
+}
+
+/// Verifies that the signature is the actual aggregated signature of messages - pubkeys.
+/// Calculated by `e(g1, signature) ==  e(\prod_{i = 0}^n pk_i, hash_i)`.
+#[cfg(feature = "pairing")]
+pub fn verify_same_message(
+    signature: &Signature,
+    message: &[u8],
+    public_keys: &[PublicKey],
+) -> bool {
+    let h = hash(message);
+
+    verify_same(signature, &h, public_keys)
 }
 
 /// Verifies that the signature is the actual aggregated signature of messages - pubkeys.
@@ -526,7 +602,8 @@ mod tests {
         let signature = sk.sign(&msg);
 
         let signature_bytes = signature.as_bytes();
-        assert_eq!(signature_bytes.len(), 96);
+        // Signature is serialized as G2Uncompressed.
+        assert_eq!(signature_bytes.len(), 192);
         assert_eq!(Signature::from_bytes(&signature_bytes).unwrap(), signature);
     }
 
@@ -623,5 +700,48 @@ mod tests {
                 assert!(pub_key.verify(signature, &case.msg), "failed to verify");
             }
         }
+    }
+
+    #[test]
+    fn verify_same_messages() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12);
+
+        let num_messages = 10;
+
+        // generate private keys
+        let private_keys: Vec<_> = (0..num_messages)
+            .map(|_| PrivateKey::generate(&mut rng))
+            .collect();
+
+        // generate messages
+        let message: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+
+        // sign messages
+        let sigs = private_keys
+            .iter()
+            .map(|pk| pk.sign(&message))
+            .collect::<Vec<Signature>>();
+
+        let aggregated_signature = aggregate(&sigs).expect("failed to aggregate");
+
+        let public_keys = private_keys
+            .iter()
+            .map(|pk| pk.public_key())
+            .collect::<Vec<_>>();
+        assert!(
+            verify_same(&aggregated_signature, &hash(&message), &public_keys),
+            "must not verify aggregate with the same messages"
+        );
+        assert!(
+            !verify_same(&sigs[0], &hash(&message), &public_keys),
+            "must not verify aggregate with the same messages"
+        );
+
+        assert!(verify_same_message(
+            &aggregated_signature,
+            &message,
+            &public_keys
+        ));
+        assert!(!verify_same_message(&sigs[0], &message, &public_keys));
     }
 }

@@ -224,7 +224,7 @@ pub mod sigma_protocol {
         CryptoRng, CurveProjective, Error, Fr, FrRepr, PrivateKey, PublicKey, RngCore, Serialize,
         Sha256, G1,
     };
-    use ff::{Field,PrimeField,PrimeFieldRepr};
+    use ff::{Field, PrimeField, PrimeFieldRepr};
     use sha2::Digest;
 
     pub type Commit = G1;
