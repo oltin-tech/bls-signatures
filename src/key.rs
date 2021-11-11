@@ -8,8 +8,9 @@ use rand_core::{CryptoRng, RngCore};
 use bls12_381::{hash_to_curve::HashToField, G1Affine, G1Projective, Scalar};
 #[cfg(feature = "pairing")]
 use hkdf::Hkdf;
+use sha2::Sha256;
 #[cfg(feature = "pairing")]
-use sha2::{digest::generic_array::typenum::U48, digest::generic_array::GenericArray, Sha256};
+use sha2::{digest::generic_array::typenum::U48, digest::generic_array::GenericArray};
 
 pub(crate) struct ScalarRepr(pub [u64; 4]);
 
@@ -220,14 +221,14 @@ impl Serialize for PublicKey {
 
 pub mod sigma_protocol {
     use super::{
-        CryptoRng, CurveProjective, Error, Fr, FrRepr, PrivateKey, PublicKey, RngCore, Serialize,
-        Sha256, G1,
+        CryptoRng, Error, G1Projective, PrivateKey, PublicKey, RngCore, Scalar, Serialize, Sha256,
     };
-    use ff::{Field, PrimeField, PrimeFieldRepr};
+    use cfg_if::cfg_if;
+    use group::Group;
     use sha2::Digest;
 
-    pub type Commit = G1;
-    pub type Answer = Fr;
+    pub type Commit = G1Projective;
+    pub type Answer = Scalar;
 
     pub fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
         Ok(PublicKey::from_bytes(bytes)?.0)
@@ -237,7 +238,7 @@ pub mod sigma_protocol {
         Ok(PrivateKey::from_bytes(bytes)?.0)
     }
 
-    fn challenge(commit: G1) -> Fr {
+    fn challenge(commit: G1Projective) -> Scalar {
         let mut serialized_commit: Vec<u8> = Vec::new();
         PublicKey(commit)
             .write_bytes(&mut serialized_commit)
@@ -247,21 +248,23 @@ pub mod sigma_protocol {
         sha256.update(&serialized_commit);
 
         let mut challenge_bytes = sha256.finalize();
-        challenge_bytes[0] &= 0x3f;
-        let mut repr = FrRepr::default();
-        repr.read_be(&challenge_bytes[..]).unwrap();
-        Fr::from_repr(repr).expect("length should be always match")
+        challenge_bytes[31] &= 0x3f;
+        cfg_if! {
+            if #[cfg(feature = "blst")] {
+                // `from_bytes` read with little endian u64.
+                Scalar::from_bytes_le(&challenge_bytes.into()).unwrap()
+            } else if #[cfg(feature = "pairing")] {
+                Scalar::from_bytes(&challenge_bytes.into()).unwrap()
+            }
+        }
     }
 
     pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) -> bool {
-        let challenge: Fr = challenge(commit);
+        let challenge: Scalar = challenge(commit);
 
-        let mut lhs = G1::one();
-        lhs.mul_assign(answer);
+        let lhs = G1Projective::generator() * answer;
 
-        let mut rhs = pubkey.0;
-        rhs.mul_assign(challenge);
-        rhs.add_assign(&commit);
+        let rhs = pubkey.0 * challenge + commit;
 
         lhs == rhs
     }
@@ -271,9 +274,7 @@ pub mod sigma_protocol {
         let commit = random.public_key().0;
         let challenge = challenge(commit);
 
-        let mut answer = prikey.0;
-        answer.mul_assign(&challenge);
-        answer.add_assign(&random.0);
+        let answer = prikey.0 * challenge + random.0;
         (commit, answer)
     }
 
