@@ -1,39 +1,41 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ff::Field;
-use groupy::{CurveAffine, CurveProjective, EncodedPoint};
 #[cfg(feature = "multicore")]
 use rayon::prelude::*;
 
 #[cfg(feature = "pairing")]
-use paired::bls12_381::{Bls12, Fq12, G1Affine, G2Affine, G2};
-#[cfg(feature = "pairing")]
-use paired::{Engine, ExpandMsgXmd, HashToCurve, PairingCurveAffine};
+use bls12_381::{
+    hash_to_curve::{ExpandMsgXmd, HashToCurve},
+    Bls12, G1Affine, G2Affine, G2Projective, Gt, MillerLoopResult,
+};
+use pairing_lib::MultiMillerLoop;
 
 #[cfg(feature = "blst")]
-use blstrs::{
-    Bls12, Engine, Fp12 as Fq12, G1Affine, G2Affine, G2Compressed, G2Projective as G2,
-    PairingCurveAffine,
-};
+use blstrs::{Bls12, G1Affine, G2Affine, G2Projective, Gt, MillerLoopResult};
+#[cfg(feature = "blst")]
+use group::{prime::PrimeCurveAffine, Group};
+#[cfg(feature = "blst")]
+use pairing_lib::MillerLoopResult as _;
 
 use crate::error::Error;
 use crate::key::*;
 use paired::bls12_381::{G2Uncompressed, G1};
 
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+const G2_COMPRESSED_SIZE: usize = 96;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Signature(G2Affine);
 
-impl From<G2> for Signature {
-    fn from(val: G2) -> Self {
-        Signature(val.into_affine())
+impl From<G2Projective> for Signature {
+    fn from(val: G2Projective) -> Self {
+        Signature(val.into())
     }
 }
-impl From<Signature> for G2 {
+impl From<Signature> for G2Projective {
     fn from(val: Signature) -> Self {
-        val.0.into_projective()
+        val.0.into()
     }
 }
 
@@ -51,7 +53,7 @@ impl From<Signature> for G2Affine {
 
 impl Serialize for Signature {
     fn write_bytes(&self, dest: &mut impl io::Write) -> io::Result<()> {
-        dest.write_all(G2Uncompressed::from_affine(self.0).as_ref())?;
+        dest.write_all(&self.0.to_compressed())?;
 
         Ok(())
     }
@@ -63,25 +65,25 @@ impl Serialize for Signature {
 }
 
 fn g2_from_slice(raw: &[u8]) -> Result<G2Affine, Error> {
-    if raw.len() != G2Uncompressed::size() {
+    if raw.len() != G2_COMPRESSED_SIZE {
         return Err(Error::SizeMismatch);
     }
 
-    let mut res = G2Uncompressed::empty();
-    res.as_mut().copy_from_slice(raw);
+    let mut res = [0u8; G2_COMPRESSED_SIZE];
+    res.copy_from_slice(raw);
 
-    Ok(res.into_affine_unchecked()?)
+    Option::from(G2Affine::from_compressed(&res)).ok_or(Error::GroupDecode)
 }
 
 /// Hash the given message, as used in the signature.
 #[cfg(feature = "pairing")]
-pub fn hash(msg: &[u8]) -> G2 {
-    <G2 as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, CSUITE)
+pub fn hash(msg: &[u8]) -> G2Projective {
+    <G2Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, CSUITE)
 }
 
 #[cfg(feature = "blst")]
-pub fn hash(msg: &[u8]) -> G2 {
-    G2::hash_to_curve(msg, CSUITE, &[])
+pub fn hash(msg: &[u8]) -> G2Projective {
+    G2Projective::hash_to_curve(msg, CSUITE, &[])
 }
 
 /// Aggregate signatures by multiplying them together.
@@ -94,16 +96,13 @@ pub fn aggregate(signatures: &[Signature]) -> Result<Signature, Error> {
 
     let res = signatures
         .into_par_iter()
-        .fold(G2::zero, |mut acc, signature| {
-            acc.add_assign_mixed(&signature.0);
+        .fold(G2Projective::identity, |mut acc, signature| {
+            acc += &signature.0;
             acc
         })
-        .reduce(G2::zero, |mut acc, val| {
-            acc.add_assign(&val);
-            acc
-        });
+        .reduce(G2Projective::identity, |acc, val| acc + val);
 
-    Ok(Signature(res.into_affine()))
+    Ok(Signature(res.into()))
 }
 
 /// Aggregate signatures by multiplying them together.
@@ -116,12 +115,11 @@ pub fn aggregate(signatures: &[Signature]) -> Result<Signature, Error> {
 
     let res = signatures
         .into_iter()
-        .fold(G2::zero(), |mut acc, signature| {
-            acc.add_assign_mixed(&signature.0);
-            acc
+        .fold(G2Projective::identity(), |acc, signature| {
+            acc + &signature.0
         });
 
-    Ok(Signature(res.into_affine()))
+    Ok(Signature(res.into()))
 }
 
 /// Verifies that the signature is the actual aggregated signature of the same message.
@@ -189,7 +187,7 @@ pub fn verify_same(signature: &Signature, h: &G2, public_keys: &[PublicKey]) -> 
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys.
 /// Calculated by `e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i)`.
 #[cfg(feature = "pairing")]
-pub fn verify(signature: &Signature, hashes: &[G2], public_keys: &[PublicKey]) -> bool {
+pub fn verify(signature: &Signature, hashes: &[G2Projective], public_keys: &[PublicKey]) -> bool {
     if hashes.is_empty() || public_keys.is_empty() {
         return false;
     }
@@ -201,7 +199,7 @@ pub fn verify(signature: &Signature, hashes: &[G2], public_keys: &[PublicKey]) -
     }
 
     // zero key & single hash should fail
-    if n_hashes == 1 && public_keys[0].0.is_zero() {
+    if n_hashes == 1 && public_keys[0].0.is_identity().into() {
         return false;
     }
 
@@ -223,51 +221,38 @@ pub fn verify(signature: &Signature, hashes: &[G2], public_keys: &[PublicKey]) -
         .par_iter()
         .zip(hashes.par_iter())
         .map(|(pk, h)| {
-            if pk.0.is_zero() {
+            if pk.0.is_identity().into() {
                 is_valid.store(false, Ordering::Relaxed);
             }
-            let pk = pk.as_affine().prepare();
-            let h = h.into_affine().prepare();
-            Bls12::miller_loop(&[(&pk, &h)])
+            let pk = pk.as_affine();
+            let h = G2Affine::from(h).into();
+            Bls12::multi_miller_loop(&[(&pk, &h)])
         })
-        .reduce(Fq12::one, |mut acc, cur| {
-            acc.mul_assign(&cur);
-            acc
-        });
+        .reduce(MillerLoopResult::default, |acc, cur| acc + cur);
 
     #[cfg(not(feature = "multicore"))]
     let mut ml = public_keys
         .iter()
         .zip(hashes.iter())
         .map(|(pk, h)| {
-            if pk.0.is_zero() {
+            if pk.0.is_identity().into() {
                 is_valid.store(false, Ordering::Relaxed);
             }
-            let pk = pk.as_affine().prepare();
-            let h = h.into_affine().prepare();
-            Bls12::miller_loop(&[(&pk, &h)])
+            let pk = pk.as_affine();
+            let h = G2Affine::from(h).into();
+            Bls12::multi_miller_loop(&[(&pk, &h)])
         })
-        .fold(Fq12::one(), |mut acc, cur| {
-            acc.mul_assign(&cur);
-            acc
-        });
+        .fold(MillerLoopResult::default(), |acc, cur| acc + cur);
 
     if !is_valid.load(Ordering::Relaxed) {
         return false;
     }
 
-    let mut g1_neg = G1Affine::one();
-    g1_neg.negate();
-    ml.mul_assign(&Bls12::miller_loop(&[(
-        &g1_neg.prepare(),
-        &signature.0.prepare(),
-    )]));
+    let g1_neg = -G1Affine::generator();
 
-    if let Some(res) = Bls12::final_exponentiation(&ml) {
-        Fq12::one() == res
-    } else {
-        false
-    }
+    ml += Bls12::multi_miller_loop(&[(&g1_neg, &signature.0.into())]);
+
+    ml.final_exponentiation() == Gt::identity()
 }
 
 /// Verifies that the signature is the actual aggregated signature of messages - pubkeys.
@@ -319,7 +304,7 @@ pub fn verify_messages(
     }
 
     // zero key & single message should fail
-    if n_messages == 1 && public_keys[0].0.is_zero() {
+    if n_messages == 1 && public_keys[0].0.is_identity().into() {
         return false;
     }
 
@@ -341,7 +326,7 @@ pub fn verify_messages(
             let mut pairing = blstrs::PairingG1G2::new(true, CSUITE);
 
             for (message, public_key) in chunk {
-                let res = pairing.aggregate(&public_key.0.into_affine(), None, message, &[]);
+                let res = pairing.aggregate(&public_key.0.into(), None, message, &[]);
                 if res.is_err() {
                     valid.store(false, Ordering::Relaxed);
                     break;
@@ -355,7 +340,7 @@ pub fn verify_messages(
         })
         .collect::<Vec<_>>();
 
-    let mut gtsig = Fq12::zero();
+    let mut gtsig = Gt::default();
     if valid.load(Ordering::Relaxed) {
         blstrs::PairingG1G2::aggregated(&mut gtsig, &signature.0);
     }
@@ -390,7 +375,7 @@ pub fn verify_messages(
     }
 
     // zero key & single message should fail
-    if n_messages == 1 && public_keys[0].0.is_zero() {
+    if n_messages == 1 && public_keys[0].0.is_identity().into() {
         return false;
     }
 
@@ -404,7 +389,7 @@ pub fn verify_messages(
     let mut valid = true;
     let mut pairing = blstrs::PairingG1G2::new(true, CSUITE);
     for (message, public_key) in messages.iter().zip(public_keys.iter()) {
-        let res = pairing.aggregate(&public_key.0.into_affine(), None, message, &[]);
+        let res = pairing.aggregate(&public_key.0.into(), None, message, &[]);
         if res.is_err() {
             valid = false;
             break;
@@ -413,7 +398,7 @@ pub fn verify_messages(
         pairing.commit();
     }
 
-    let mut gtsig = Fq12::zero();
+    let mut gtsig = Gt::default();
     if valid {
         blstrs::PairingG1G2::aggregated(&mut gtsig, &signature.0);
     }
@@ -430,10 +415,14 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use serde::Deserialize;
 
-    #[cfg(feature = "blst")]
-    use blstrs::{G1Compressed, G1Projective as G1, Scalar as Fr};
     #[cfg(feature = "pairing")]
-    use paired::bls12_381::{Fr, G1Compressed, G1};
+    use crate::key::G1_COMPRESSED_SIZE;
+    #[cfg(feature = "pairing")]
+    use bls12_381::{G1Projective, Scalar};
+    #[cfg(feature = "blst")]
+    use blstrs::{G1Projective, Scalar};
+    #[cfg(feature = "blst")]
+    use ff::Field;
 
     #[test]
     fn basic_aggregation() {
@@ -528,8 +517,8 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(12);
 
         // In the current iteration we expect the zero key to be valid and work.
-        let zero_key: PrivateKey = Fr::zero().into();
-        assert!(zero_key.public_key().0.is_zero());
+        let zero_key: PrivateKey = Scalar::zero().into();
+        assert!(bool::from(zero_key.public_key().0.is_identity()));
 
         println!(
             "{:?}\n{:?}",
@@ -633,32 +622,32 @@ mod tests {
     }
 
     fn g1_from_slice(raw: &[u8]) -> Result<G1Affine, Error> {
-        if raw.len() != G1Compressed::size() {
+        if raw.len() != G1_COMPRESSED_SIZE {
             return Err(Error::SizeMismatch);
         }
 
-        let mut res = G1Compressed::empty();
+        let mut res = [0u8; G1_COMPRESSED_SIZE];
         res.as_mut().copy_from_slice(raw);
 
-        Ok(res.into_affine()?)
+        Option::from(G1Affine::from_compressed(&res)).ok_or(Error::GroupDecode)
     }
 
     #[cfg(feature = "pairing")]
-    fn hash_to_g1(msg: &[u8], suite: &[u8]) -> G1 {
-        <G1 as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, suite)
+    fn hash_to_g1(msg: &[u8], suite: &[u8]) -> G1Projective {
+        <G1Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, suite)
     }
     #[cfg(feature = "blst")]
-    fn hash_to_g1(msg: &[u8], suite: &[u8]) -> G1 {
-        G1::hash_to_curve(msg, suite, &[])
+    fn hash_to_g1(msg: &[u8], suite: &[u8]) -> G1Projective {
+        G1Projective::hash_to_curve(msg, suite, &[])
     }
 
     #[cfg(feature = "pairing")]
-    fn hash_to_g2(msg: &[u8], suite: &[u8]) -> G2 {
-        <G2 as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, suite)
+    fn hash_to_g2(msg: &[u8], suite: &[u8]) -> G2Projective {
+        <G2Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(msg, suite)
     }
     #[cfg(feature = "blst")]
-    fn hash_to_g2(msg: &[u8], suite: &[u8]) -> G2 {
-        G2::hash_to_curve(msg, suite, &[])
+    fn hash_to_g2(msg: &[u8], suite: &[u8]) -> G2Projective {
+        G2Projective::hash_to_curve(msg, suite, &[])
     }
 
     #[test]
@@ -667,18 +656,14 @@ mod tests {
             serde_json::from_slice(&std::fs::read("./tests/data.json").unwrap()).unwrap();
 
         for case in cases.cases {
-            let g1: G1 = g1_from_slice(&case.g1_compressed)
-                .unwrap()
-                .into_projective();
+            let g1: G1Projective = g1_from_slice(&case.g1_compressed).unwrap().into();
 
             assert_eq!(
                 g1,
                 hash_to_g1(case.msg.as_bytes(), case.ciphersuite.as_bytes())
             );
 
-            let g2: G2 = g2_from_slice(&case.g2_compressed)
-                .unwrap()
-                .into_projective();
+            let g2: G2Projective = g2_from_slice(&case.g2_compressed).unwrap().into();
             assert_eq!(
                 g2,
                 hash_to_g2(case.msg.as_bytes(), case.ciphersuite.as_bytes())
