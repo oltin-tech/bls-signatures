@@ -248,12 +248,13 @@ pub mod sigma_protocol {
         sha256.update(&serialized_commit);
 
         let mut challenge_bytes = sha256.finalize();
-        challenge_bytes[31] &= 0x3f;
+        challenge_bytes[0] &= 0x3f;
         cfg_if! {
             if #[cfg(feature = "blst")] {
                 // `from_bytes` read with little endian u64.
-                Scalar::from_bytes_le(&challenge_bytes.into()).unwrap()
+                Scalar::from_bytes_be(&challenge_bytes.into()).unwrap()
             } else if #[cfg(feature = "pairing")] {
+                challenge_bytes.reverse();
                 Scalar::from_bytes(&challenge_bytes.into()).unwrap()
             }
         }
