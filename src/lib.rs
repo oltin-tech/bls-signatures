@@ -6,7 +6,7 @@ mod key;
 mod signature;
 
 pub use self::error::Error;
-pub use self::key::{sigma_protocol, PrivateKey, PublicKey, Serialize};
+pub use self::key::{sigma_protocol, PrivateKey, PublicKey, Serialize, DeserializeUnchecked};
 pub use self::signature::{aggregate, hash, verify_messages, verify_same_message, Signature};
 
 #[cfg(test)]

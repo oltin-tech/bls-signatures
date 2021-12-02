@@ -81,6 +81,10 @@ pub trait Serialize: ::std::fmt::Debug + Sized {
     }
 }
 
+pub trait DeserializeUnchecked: Sized {
+    fn from_bytes_unchecked(raw: &[u8]) -> Result<Self, Error>;
+}
+
 impl PrivateKey {
     /// Generate a deterministic private key from the given bytes.
     ///
@@ -215,6 +219,24 @@ impl Serialize for PublicKey {
             let mut res = [0u8; G1_UNCOMPRESSED_SIZE];
             res.as_mut().copy_from_slice(raw);
             Option::from(G1Affine::from_uncompressed(&res)).ok_or(Error::GroupDecode)?
+        } else {
+            return Err(Error::SizeMismatch);
+        };
+
+        Ok(PublicKey(affine.into()))
+    }
+}
+
+impl DeserializeUnchecked for PublicKey {
+    fn from_bytes_unchecked(raw: &[u8]) -> Result<Self, Error> {
+        let affine: G1Affine = if raw.len() == G1_COMPRESSED_SIZE {
+            let mut res = [0u8; G1_COMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_compressed_unchecked(&res)).ok_or(Error::GroupDecode)?
+        } else if raw.len() == G1_UNCOMPRESSED_SIZE {
+            let mut res = [0u8; G1_UNCOMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_uncompressed_unchecked(&res)).ok_or(Error::GroupDecode)?
         } else {
             return Err(Error::SizeMismatch);
         };
