@@ -204,7 +204,7 @@ impl PublicKey {
 impl Serialize for PublicKey {
     fn write_bytes(&self, dest: &mut impl io::Write) -> io::Result<()> {
         let t = self.0.to_affine();
-        let tmp = t.to_uncompressed();
+        let tmp = t.to_compressed();
         dest.write_all(tmp.as_ref())?;
 
         Ok(())
