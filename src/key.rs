@@ -23,6 +23,7 @@ use crate::error::Error;
 use crate::signature::*;
 
 pub(crate) const G1_COMPRESSED_SIZE: usize = 48;
+pub(crate) const G1_UNCOMPRESSED_SIZE: usize = 96;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PublicKey(pub(crate) G1Projective);
@@ -199,21 +200,24 @@ impl PublicKey {
 impl Serialize for PublicKey {
     fn write_bytes(&self, dest: &mut impl io::Write) -> io::Result<()> {
         let t = self.0.to_affine();
-        let tmp = t.to_compressed();
+        let tmp = t.to_uncompressed();
         dest.write_all(tmp.as_ref())?;
 
         Ok(())
     }
 
     fn from_bytes(raw: &[u8]) -> Result<Self, Error> {
-        if raw.len() != G1_COMPRESSED_SIZE {
+        let affine: G1Affine = if raw.len() == G1_COMPRESSED_SIZE {
+            let mut res = [0u8; G1_COMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_compressed(&res)).ok_or(Error::GroupDecode)?
+        } else if raw.len() == G1_UNCOMPRESSED_SIZE {
+            let mut res = [0u8; G1_UNCOMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_uncompressed(&res)).ok_or(Error::GroupDecode)?
+        } else {
             return Err(Error::SizeMismatch);
-        }
-
-        let mut res = [0u8; G1_COMPRESSED_SIZE];
-        res.as_mut().copy_from_slice(raw);
-        let affine: G1Affine =
-            Option::from(G1Affine::from_compressed(&res)).ok_or(Error::GroupDecode)?;
+        };
 
         Ok(PublicKey(affine.into()))
     }
@@ -361,7 +365,7 @@ mod tests {
         let pk = sk.public_key();
         let pk_bytes = pk.as_bytes();
 
-        assert_eq!(pk_bytes.len(), 48);
+        assert_eq!(pk_bytes.len(), 96);
         assert_eq!(PublicKey::from_bytes(&pk_bytes).unwrap(), pk);
     }
 

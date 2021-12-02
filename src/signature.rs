@@ -66,14 +66,17 @@ impl Serialize for Signature {
 }
 
 fn g2_from_slice(raw: &[u8]) -> Result<G2Affine, Error> {
-    if raw.len() != G2_UNCOMPRESSED_SIZE {
-        return Err(Error::SizeMismatch);
+    if raw.len() == G2_UNCOMPRESSED_SIZE {
+        let mut res = [0u8; G2_UNCOMPRESSED_SIZE];
+        res.copy_from_slice(raw);
+        Option::from(G2Affine::from_uncompressed(&res)).ok_or(Error::GroupDecode)
+    } else if raw.len() == G2_COMPRESSED_SIZE {
+        let mut res = [0u8; G2_COMPRESSED_SIZE];
+        res.copy_from_slice(raw);
+        Option::from(G2Affine::from_compressed(&res)).ok_or(Error::GroupDecode)
+    } else {
+        Err(Error::SizeMismatch)
     }
-
-    let mut res = [0u8; G2_UNCOMPRESSED_SIZE];
-    res.copy_from_slice(raw);
-
-    Option::from(G2Affine::from_uncompressed(&res)).ok_or(Error::GroupDecode)
 }
 
 #[allow(unused)]
