@@ -250,7 +250,7 @@ pub mod sigma_protocol {
         CryptoRng, Error, G1Projective, PrivateKey, PublicKey, RngCore, Scalar, Serialize, Sha256,
     };
     use cfg_if::cfg_if;
-    use group::Group;
+    use group::{Curve, Group};
     use sha2::Digest;
 
     pub type Commit = G1Projective;
@@ -264,14 +264,23 @@ pub mod sigma_protocol {
         Ok(PrivateKey::from_bytes(bytes)?.0)
     }
 
-    fn challenge(commit: G1Projective) -> Scalar {
-        let mut serialized_commit: Vec<u8> = Vec::new();
+    fn unify_pubkey(pubkey: &PublicKey) -> PublicKey {
+        PublicKey(pubkey.0.to_affine().into())
+    }
+
+    fn challenge(pubkey: &PublicKey, commit: G1Projective, legacy: bool) -> Scalar {
+        let mut serialized_challenge: Vec<u8> = Vec::new();
+        if !legacy {
+            unify_pubkey(pubkey)
+                .write_bytes(&mut serialized_challenge)
+                .expect("write bytes to vector should not fail");
+        }
         PublicKey(commit)
-            .write_bytes(&mut serialized_commit)
+            .write_bytes(&mut serialized_challenge)
             .expect("write bytes to vector should not fail");
 
         let mut sha256 = Sha256::default();
-        sha256.update(&serialized_commit);
+        sha256.update(&serialized_challenge);
 
         let mut challenge_bytes = sha256.finalize();
         challenge_bytes[0] &= 0x3f;
@@ -286,8 +295,8 @@ pub mod sigma_protocol {
         }
     }
 
-    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer) -> bool {
-        let challenge: Scalar = challenge(commit);
+    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer, legacy: bool) -> bool {
+        let challenge: Scalar = challenge(&pubkey, commit, legacy);
 
         let lhs = G1Projective::generator() * answer;
 
@@ -296,13 +305,32 @@ pub mod sigma_protocol {
         lhs == rhs
     }
 
-    pub fn prove<R: RngCore + CryptoRng>(prikey: PrivateKey, rng: &mut R) -> (Commit, Answer) {
+    pub fn prove<R: RngCore + CryptoRng>(
+        prikey: PrivateKey,
+        rng: &mut R,
+        legacy: bool,
+    ) -> (Commit, Answer) {
         let random = PrivateKey::generate(rng);
         let commit = random.public_key().0;
-        let challenge = challenge(commit);
+        let pubkey = prikey.public_key();
+        let challenge = challenge(&pubkey, commit, legacy);
 
         let answer = prikey.0 * challenge + random.0;
         (commit, answer)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_sigma_protocol_legacy() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for i in 0..100 {
+            let mut rng = StdRng::seed_from_u64(i);
+
+            let prikey = PrivateKey::generate(&mut rng);
+            let (commit, answer) = prove(prikey, &mut rng, true);
+            assert!(verify(prikey.public_key(), commit, answer, true));
+        }
     }
 
     #[cfg(test)]
@@ -314,8 +342,8 @@ pub mod sigma_protocol {
             let mut rng = StdRng::seed_from_u64(i);
 
             let prikey = PrivateKey::generate(&mut rng);
-            let (commit, answer) = prove(prikey, &mut rng);
-            assert!(verify(prikey.public_key(), commit, answer));
+            let (commit, answer) = prove(prikey, &mut rng, false);
+            assert!(verify(prikey.public_key(), commit, answer, false));
         }
     }
 }
