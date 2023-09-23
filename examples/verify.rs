@@ -99,10 +99,6 @@ fn run(num_messages: usize) {
         agg_sig = Signature::from_bytes(&serialized_signature).unwrap();
     });
 
-    measure!("verification", num_messages, {
-        assert!(verify(&agg_sig, &hashes, &public_keys));
-    });
-
     measure!("verification messages", num_messages, {
         let messages = messages.iter().map(|r| &r[..]).collect::<Vec<_>>();
         assert!(verify_messages(&agg_sig, &messages[..], &public_keys));

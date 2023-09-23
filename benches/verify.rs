@@ -28,16 +28,19 @@ macro_rules! bench_verify {
 
             let aggregated_signature = aggregate(&sigs).unwrap();
 
-            let hashes = messages
-                .iter()
-                .map(|message| hash(message))
-                .collect::<Vec<_>>();
             let public_keys = private_keys
                 .iter()
                 .map(|pk| pk.public_key())
                 .collect::<Vec<_>>();
+            let messages = messages.iter().map(|r| &r[..]).collect::<Vec<_>>();
 
-            b.iter(|| black_box(verify(&aggregated_signature, &hashes, &public_keys)))
+            b.iter(|| {
+                black_box(verify_messages(
+                    &aggregated_signature,
+                    &messages[..],
+                    &public_keys,
+                ))
+            })
         }
     };
 }

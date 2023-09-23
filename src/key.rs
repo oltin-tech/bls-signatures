@@ -8,8 +8,9 @@ use rand_core::{CryptoRng, RngCore};
 use bls12_381::{hash_to_curve::HashToField, G1Affine, G1Projective, Scalar};
 #[cfg(feature = "pairing")]
 use hkdf::Hkdf;
+use sha2::Sha256;
 #[cfg(feature = "pairing")]
-use sha2::{digest::generic_array::typenum::U48, digest::generic_array::GenericArray, Sha256};
+use sha2::{digest::generic_array::typenum::U48, digest::generic_array::GenericArray};
 
 pub(crate) struct ScalarRepr(pub [u64; 4]);
 
@@ -22,6 +23,7 @@ use crate::error::Error;
 use crate::signature::*;
 
 pub(crate) const G1_COMPRESSED_SIZE: usize = 48;
+pub(crate) const G1_UNCOMPRESSED_SIZE: usize = 96;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PublicKey(pub(crate) G1Projective);
@@ -34,6 +36,7 @@ impl From<G1Projective> for PublicKey {
         PublicKey(val)
     }
 }
+
 impl From<PublicKey> for G1Projective {
     fn from(val: PublicKey) -> Self {
         val.0
@@ -76,6 +79,10 @@ pub trait Serialize: ::std::fmt::Debug + Sized {
         self.write_bytes(&mut res).expect("preallocated");
         res
     }
+}
+
+pub trait DeserializeUnchecked: Sized {
+    fn from_bytes_unchecked(raw: &[u8]) -> Result<Self, Error>;
 }
 
 impl PrivateKey {
@@ -204,16 +211,140 @@ impl Serialize for PublicKey {
     }
 
     fn from_bytes(raw: &[u8]) -> Result<Self, Error> {
-        if raw.len() != G1_COMPRESSED_SIZE {
+        let affine: G1Affine = if raw.len() == G1_COMPRESSED_SIZE {
+            let mut res = [0u8; G1_COMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_compressed(&res)).ok_or(Error::GroupDecode)?
+        } else if raw.len() == G1_UNCOMPRESSED_SIZE {
+            let mut res = [0u8; G1_UNCOMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_uncompressed(&res)).ok_or(Error::GroupDecode)?
+        } else {
             return Err(Error::SizeMismatch);
-        }
-
-        let mut res = [0u8; G1_COMPRESSED_SIZE];
-        res.as_mut().copy_from_slice(raw);
-        let affine: G1Affine =
-            Option::from(G1Affine::from_compressed(&res)).ok_or(Error::GroupDecode)?;
+        };
 
         Ok(PublicKey(affine.into()))
+    }
+}
+
+impl DeserializeUnchecked for PublicKey {
+    fn from_bytes_unchecked(raw: &[u8]) -> Result<Self, Error> {
+        let affine: G1Affine = if raw.len() == G1_COMPRESSED_SIZE {
+            let mut res = [0u8; G1_COMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_compressed_unchecked(&res)).ok_or(Error::GroupDecode)?
+        } else if raw.len() == G1_UNCOMPRESSED_SIZE {
+            let mut res = [0u8; G1_UNCOMPRESSED_SIZE];
+            res.as_mut().copy_from_slice(raw);
+            Option::from(G1Affine::from_uncompressed_unchecked(&res)).ok_or(Error::GroupDecode)?
+        } else {
+            return Err(Error::SizeMismatch);
+        };
+
+        Ok(PublicKey(affine.into()))
+    }
+}
+
+pub mod sigma_protocol {
+    use super::{
+        CryptoRng, Error, G1Projective, PrivateKey, PublicKey, RngCore, Scalar, Serialize, Sha256,
+    };
+    use cfg_if::cfg_if;
+    use group::{Curve, Group};
+    use sha2::Digest;
+
+    pub type Commit = G1Projective;
+    pub type Answer = Scalar;
+
+    pub fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
+        Ok(PublicKey::from_bytes(bytes)?.0)
+    }
+
+    pub fn decode_answer(bytes: &[u8]) -> Result<Answer, Error> {
+        Ok(PrivateKey::from_bytes(bytes)?.0)
+    }
+
+    fn unify_pubkey(pubkey: &PublicKey) -> PublicKey {
+        PublicKey(pubkey.0.to_affine().into())
+    }
+
+    fn challenge(pubkey: &PublicKey, commit: G1Projective, legacy: bool) -> Scalar {
+        let mut serialized_challenge: Vec<u8> = Vec::new();
+        if !legacy {
+            unify_pubkey(pubkey)
+                .write_bytes(&mut serialized_challenge)
+                .expect("write bytes to vector should not fail");
+        }
+        PublicKey(commit)
+            .write_bytes(&mut serialized_challenge)
+            .expect("write bytes to vector should not fail");
+
+        let mut sha256 = Sha256::default();
+        sha256.update(&serialized_challenge);
+
+        let mut challenge_bytes = sha256.finalize();
+        challenge_bytes[0] &= 0x3f;
+        cfg_if! {
+            if #[cfg(feature = "blst")] {
+                // `from_bytes` read with little endian u64.
+                Scalar::from_bytes_be(&challenge_bytes.into()).unwrap()
+            } else if #[cfg(feature = "pairing")] {
+                challenge_bytes.reverse();
+                Scalar::from_bytes(&challenge_bytes.into()).unwrap()
+            }
+        }
+    }
+
+    pub fn verify(pubkey: PublicKey, commit: Commit, answer: Answer, legacy: bool) -> bool {
+        let challenge: Scalar = challenge(&pubkey, commit, legacy);
+
+        let lhs = G1Projective::generator() * answer;
+
+        let rhs = pubkey.0 * challenge + commit;
+
+        lhs == rhs
+    }
+
+    pub fn prove<R: RngCore + CryptoRng>(
+        prikey: PrivateKey,
+        rng: &mut R,
+        legacy: bool,
+    ) -> (Commit, Answer) {
+        let random = PrivateKey::generate(rng);
+        let commit = random.public_key().0;
+        let pubkey = prikey.public_key();
+        let challenge = challenge(&pubkey, commit, legacy);
+
+        let answer = prikey.0 * challenge + random.0;
+        (commit, answer)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_sigma_protocol_legacy() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for i in 0..100 {
+            let mut rng = StdRng::seed_from_u64(i);
+
+            let prikey = PrivateKey::generate(&mut rng);
+            let (commit, answer) = prove(prikey, &mut rng, true);
+            assert!(verify(prikey.public_key(), commit, answer, true));
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_sigma_protocol() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        for i in 0..100 {
+            let mut rng = StdRng::seed_from_u64(i);
+
+            let prikey = PrivateKey::generate(&mut rng);
+            let (commit, answer) = prove(prikey, &mut rng, false);
+            assert!(verify(prikey.public_key(), commit, answer, false));
+        }
     }
 }
 
@@ -284,7 +415,7 @@ mod tests {
         let pk = sk.public_key();
         let pk_bytes = pk.as_bytes();
 
-        assert_eq!(pk_bytes.len(), 48);
+        assert_eq!(pk_bytes.len(), 96);
         assert_eq!(PublicKey::from_bytes(&pk_bytes).unwrap(), pk);
     }
 
